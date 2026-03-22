@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>🏦 Retirement Planner</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#020617;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;min-height:100vh}
+input[type=number]{-moz-appearance:textfield;width:100%}
+input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:#0f172a}
+::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.pulse{animation:pu 1.8s ease-in-out infinite}@keyframes pu{0%,100%{opacity:1}50%{opacity:.72}}
+button{cursor:pointer;border:none;transition:filter .15s}
+button:hover:not(:disabled){filter:brightness(1.1)}
+table{border-collapse:collapse;width:100%}
+th{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#64748b;border-bottom:1px solid #1e293b;padding:8px 10px;white-space:nowrap;text-align:left}
+td{font-size:12px;border-bottom:1px solid rgba(30,41,59,.5);padding:8px 10px;text-align:left}
+tr:last-child td{border-bottom:none}
+.r{text-align:right}
+.card{background:rgba(30,41,59,.6);border:1px solid rgba(71,85,105,.4);border-radius:18px;padding:18px}
+/* Sticky simulate bar at bottom */
+#sim-bar{position:fixed;bottom:0;left:0;right:0;z-index:100;padding:10px 16px;background:rgba(2,6,23,.92);border-top:1px solid #1e293b;backdrop-filter:blur(12px)}
+#main-content{padding-bottom:80px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const{createElement:h,useState,useCallback,useEffect,useRef,Fragment}=React;
+
+/* ── formatters ── */
+const fmt=n=>!isFinite(n)||isNaN(n)?"$0":Math.abs(n)>=1e6?`$${(n/1e6).toFixed(2)}M`:Math.abs(n)>=1e3?`$${(n/1e3).toFixed(0)}K`:`$${Math.round(n).toLocaleString()}`;
+const fmtPct=n=>`${(n*100).toFixed(1)}%`;
+const fmtFull=n=>(n<0?"−":"")+"$"+Math.round(Math.abs(n)).toLocaleString();
+const fmtP=n=>`${(n*100).toFixed(0)}%`;
+
+/* ── Monte Carlo ── */
+function runMC(p,nSims=1000){
+  const{curAge,lifeAge,inflation,initPort,annContrib,contribGrowth,
+    ssIncome,ssStartAge,retSpend,retAge,stockRet,bondRet,reEstRet,
+    stockPre,stockRetAlloc,reEstPct,stdStock,stdBond,
+    recEvery,recDrop,recRecov,earlyRec}=p;
+  const ya=retAge-curAge,yd=lifeAge-retAge;
+  if(ya<1||yd<1)return null;
+  const T=ya+yd;
+  let seed=98765;
+  const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+  const randn=()=>{const u=Math.max(rand(),1e-10),v=rand();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
+  const lp=1-reEstPct;
+  const muA=lp*(stockPre*stockRet+(1-stockPre)*bondRet)+reEstPct*reEstRet;
+  const sgA=lp*(stockPre*stdStock+(1-stockPre)*stdBond)*.95;
+  const lr=Math.max(1-reEstPct*.5,.5);
+  const muD=lr*(stockRetAlloc*stockRet+(1-stockRetAlloc)*bondRet)+(1-lr)*reEstRet;
+  const sgD=lr*(stockRetAlloc*stdStock+(1-stockRetAlloc)*stdBond)*.9;
+  const rs=new Array(T).fill("n");
+  if(recEvery>0)for(let y=recEvery-1;y<T;y+=recEvery){rs[y]="d";if(y+1<T)rs[y+1]="r";}
+  const edy=earlyRec==="y0"?0:earlyRec==="y1"?1:earlyRec==="y2"?2:-1;
+  const yrly=Array.from({length:T+1},()=>[]);
+  const par=[],pfin=[];let ruin=0;
+  for(let s=0;s<nSims;s++){
+    let port=initPort;yrly[0].push(port);
+    for(let yr=0;yr<ya;yr++){
+      let r;
+      if(rs[yr]==="d")r=-(recDrop+.04*randn());
+      else if(rs[yr]==="r")r=recRecov+sgA*Math.abs(randn())*.5;
+      else r=muA+sgA*randn();
+      port=Math.max(port*(1+r)+annContrib*Math.pow(1+contribGrowth,yr),0);
+      yrly[yr+1].push(port);
+    }
+    par.push(port);
+    let ruined=false;
+    for(let yr=0;yr<yd;yr++){
+      const sc=rs[ya+yr];let r;
+      if(edy>=0&&yr===edy)r=-(recDrop+.03*randn());
+      else if(edy>=0&&yr===edy+1)r=recRecov*.8+sgD*Math.abs(randn())*.4;
+      else if(sc==="d")r=-(recDrop+.04*randn());
+      else if(sc==="r")r=recRecov+sgD*Math.abs(randn())*.5;
+      else r=muD+sgD*randn();
+      const sp=retSpend*Math.pow(1+inflation,yr);
+      const ss=(retAge+yr)>=ssStartAge?ssIncome*Math.pow(1+inflation,yr):0;
+      port=port*(1+r)-Math.max(sp-ss,0);
+      if(port<=0){port=0;ruined=true;}
+      yrly[ya+yr+1].push(port);
+    }
+    pfin.push(port);if(ruined)ruin++;
+  }
+  const pct=(arr,p)=>{const s=[...arr].sort((a,b)=>a-b);return s[Math.max(0,Math.floor(p/100*(s.length-1)))]||0;};
+  const recAges=[];
+  if(recEvery>0)for(let y=recEvery-1;y<T;y+=recEvery)recAges.push(curAge+y);
+  if(edy>=0)recAges.push(retAge+edy);
+  return{
+    sr:1-ruin/nSims,ruin:ruin/nSims,
+    par:{p5:pct(par,5),p25:pct(par,25),p50:pct(par,50),p75:pct(par,75),p95:pct(par,95)},
+    pfin:{p5:pct(pfin,5),p25:pct(pfin,25),p50:pct(pfin,50),p75:pct(pfin,75),p95:pct(pfin,95)},
+    recAges,
+    chartLabels:yrly.map((_,i)=>curAge+i),
+    p5:yrly.map(v=>Math.round(pct(v,5))),
+    p25:yrly.map(v=>Math.round(pct(v,25))),
+    p50:yrly.map(v=>Math.round(pct(v,50))),
+    p75:yrly.map(v=>Math.round(pct(v,75))),
+    p95:yrly.map(v=>Math.round(pct(v,95))),
+    retAge,
+  };
+}
+
+/* ── scenario builder ── */
+function buildScen(p){
+  const bl=(1-p.reEstPct)*(p.stockPre*p.stockRet+(1-p.stockPre)*p.bondRet)+p.reEstPct*p.reEstRet;
+  const ya=Math.max(p.retAge-p.curAge,1);
+  const pp=y=>y<=0?p.initPort:p.initPort*Math.pow(1+bl,y)+p.annContrib*(Math.pow(1+bl,y)-1)/bl;
+  const ret=[55,58,60,62,65,67,70].map(age=>{const port=pp(age-p.curAge),w4=port*.04;return{age,yrs:age-p.curAge,port,w4,sur:w4-p.retSpend,ok:w4>=p.retSpend,mine:age===p.retAge};});
+  const spe=[60000,80000,100000,120000,150000,180000,250000].map(sp=>{const port=pp(ya),r4=sp/.04;return{sp,r4,port,sur:port-r4,ok:port>=r4,mine:sp===p.retSpend};});
+  const inf=[.01,.02,.03,.04,.05,.06,.08].map(i=>{const ns=p.retSpend*Math.pow(1+i,ya),rr=bl-i,nest=ns/.04,w20=p.retSpend/Math.pow(1+i,20);return{inf:i,ns,rr,nest,w20,mine:Math.abs(i-p.inflation)<.001};});
+  const con=[50000,100000,150000,200000,250000,300000,400000].map(c=>{const port=p.initPort*Math.pow(1+bl,ya)+c*(Math.pow(1+bl,ya)-1)/bl;return{c,port,sur:port-p.retSpend/.04,ok:port>=p.retSpend/.04,mine:c===p.annContrib};});
+  const rL={none:"No Early Recession",y0:"Crash at Yr 1",y1:"Crash at Yr 2",y2:"Crash at Yr 3"};
+  const rec=["none","y0","y1","y2"].map(key=>{const r=runMC({...p,earlyRec:key},400);return{key,label:rL[key],sr:r?.sr??0,med:r?.par.p50??0,fin:r?.pfin.p50??0,mine:key===p.earlyRec};});
+  return{ret,spe,inf,con,rec};
+}
+
+/* ── Excel export ── */
+function exportExcel(p,results,scen){
+  const WB=XLSX.utils.book_new();
+  // Helper
+  const addSheet=(name,rows)=>XLSX.utils.book_append_sheet(WB,XLSX.utils.aoa_to_sheet(rows),name);
+
+  // Dashboard
+  addSheet("Dashboard",[
+    ["RETIREMENT PLANNER — INPUTS & RESULTS"],[""],
+    ["PRIMARY INPUTS","","VALUE"],
+    ["Current Age","",p.curAge],["Life Expectancy","",p.lifeAge],["Inflation Rate","",p.inflation],[""],
+    ["PORTFOLIO BREAKDOWN","",""],
+    ["Tax-Deferred (401k/IRA)","",p.taxDef],["After-Tax (Brokerage/Roth)","",p.afterTax],["Real Estate Equity","",p.realEst],["Total Portfolio","",p.taxDef+p.afterTax+p.realEst],[""],
+    ["SAVINGS & INCOME","",""],
+    ["Retirement Age","",p.retAge],["Annual Contribution","",p.annContrib],["Annual Spending (Ret.)","",p.retSpend],["SS / Pension Income","",p.ssIncome],["SS Start Age","",p.ssStartAge],[""],
+    ["MARKET ASSUMPTIONS","",""],
+    ["Stock Return","",p.stockRet],["Bond Return","",p.bondRet],["Real Estate Return","",p.reEstRet],["Stock Alloc — Accumulation","",p.stockPre],["Stock Alloc — Distribution","",p.stockRetAlloc],[""],
+    ["RECESSION SETTINGS","",""],
+    ["Recession Every N Years","",p.recEvery],["Portfolio Drop Year 1","",p.recDrop],["Recovery Year 2","",p.recRecov],["Early Ret. Recession","",p.earlyRec],
+  ]);
+
+  if(results){
+    // MC Results
+    addSheet("Monte Carlo Results",[
+      ["MONTE CARLO SIMULATION — 1,000 SCENARIOS"],[""],
+      ["METRIC","VALUE"],
+      ["Survival Rate",results.sr],["Ruin Probability",results.ruin],[""],
+      ["PORTFOLIO AT RETIREMENT","5th %ile","25th %ile","Median","75th %ile","95th %ile"],
+      ["Portfolio @ Retire",results.par.p5,results.par.p25,results.par.p50,results.par.p75,results.par.p95],
+      ["Portfolio @ End of Life",results.pfin.p5,results.pfin.p25,results.pfin.p50,results.pfin.p75,results.pfin.p95],
+      ["4% Withdrawal/yr",results.par.p5*.04,results.par.p25*.04,results.par.p50*.04,results.par.p75*.04,results.par.p95*.04],
+    ]);
+
+    // Projection table
+    const projRows=[["Age","5th %ile","25th %ile","Median","75th %ile","95th %ile"]];
+    results.chartLabels.forEach((age,i)=>{
+      projRows.push([age,results.p5[i],results.p25[i],results.p50[i],results.p75[i],results.p95[i]]);
+    });
+    addSheet("Projection Data",projRows);
+  }
+
+  if(scen){
+    // Retire age sensitivity
+    const retRows=[["Retire At","Yrs Growth","Portfolio","4% Income/yr","vs Spending","Funded?"]];
+    scen.ret.forEach(r=>retRows.push([r.age,r.yrs,r.port,r.w4,r.sur,r.ok?"Yes":"No"]));
+    addSheet("Retire Age Scenarios",retRows);
+
+    // Spending
+    const speRows=[["Annual Spend","Monthly","Nest Egg Needed","Portfolio","Surplus/(Deficit)","Covered?"]];
+    scen.spe.forEach(r=>speRows.push([r.sp,r.sp/12,r.r4,r.port,r.sur,r.ok?"Yes":"No"]));
+    addSheet("Spending Scenarios",speRows);
+
+    // Inflation
+    const infRows=[["Inflation Rate","$120K Worth 20yr","Nominal Spend @ Retire","Real Return","Nest Egg Needed"]];
+    scen.inf.forEach(r=>infRows.push([r.inf,r.w20,r.ns,r.rr,r.nest]));
+    addSheet("Inflation Scenarios",infRows);
+
+    // Recession timing
+    const recRows=[["Scenario","Survival Rate","Median @ Retire","Median Estate"]];
+    scen.rec.forEach(r=>recRows.push([r.label,r.sr,r.med,r.fin]));
+    addSheet("Recession Timing",recRows);
+  }
+
+  XLSX.writeFile(WB,"Retirement_Planner.xlsx");
+}
+
+/* ── Chart.js components ── */
+function LineChartC({results}){
+  const ref=useRef(null);const ch=useRef(null);
+  useEffect(()=>{
+    if(!results||!ref.current)return;
+    if(ch.current){ch.current.destroy();ch.current=null;}
+    const ctx=ref.current.getContext("2d");
+    const retIdx=results.chartLabels.indexOf(results.retAge);
+    const plugin={id:"vlines",afterDraw(c){
+      const{ctx:x,chartArea:{top,bottom},scales:{x:xs}}=c;
+      // Retirement line
+      if(retIdx>=0){
+        const px=xs.getPixelForIndex(retIdx);
+        x.save();x.beginPath();x.moveTo(px,top);x.lineTo(px,bottom);
+        x.strokeStyle="#f59e0b";x.lineWidth=2;x.setLineDash([6,4]);x.stroke();
+        x.fillStyle="#f59e0b";x.font="bold 11px system-ui";x.fillText(`Retire (${results.retAge})`,px+4,top+14);
+        x.restore();
+      }
+      // Recession lines
+      results.recAges.forEach(a=>{
+        const i=results.chartLabels.indexOf(a);if(i<0)return;
+        const px=xs.getPixelForIndex(i);
+        x.save();x.beginPath();x.moveTo(px,top);x.lineTo(px,bottom);
+        x.strokeStyle="#ef4444";x.lineWidth=1.5;x.setLineDash([4,4]);x.globalAlpha=.55;x.stroke();
+        x.restore();
+      });
+    }};
+    ch.current=new Chart(ctx,{
+      type:"line",plugins:[plugin],
+      data:{labels:results.chartLabels,datasets:[
+        {label:"95th",data:results.p95,borderColor:"#6ee7b7",borderWidth:1.5,borderDash:[6,4],pointRadius:0,fill:false,tension:.3},
+        {label:"75th",data:results.p75,borderColor:"#10b981",borderWidth:2,pointRadius:0,fill:"+1",backgroundColor:"rgba(16,185,129,.12)",tension:.3},
+        {label:"Median",data:results.p50,borderColor:"#3b82f6",borderWidth:3,pointRadius:0,fill:false,tension:.3},
+        {label:"25th",data:results.p25,borderColor:"#f59e0b",borderWidth:1.5,pointRadius:0,fill:false,tension:.3},
+        {label:"5th",data:results.p5,borderColor:"#ef4444",borderWidth:1.5,borderDash:[6,4],pointRadius:0,fill:false,tension:.3},
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:"index",intersect:false},
+        plugins:{legend:{labels:{color:"#94a3b8",font:{size:11},boxWidth:16,padding:12}},
+          tooltip:{backgroundColor:"#0f172a",borderColor:"#334155",borderWidth:1,callbacks:{label:c=>`${c.dataset.label}: ${fmt(c.parsed.y)}`}}},
+        scales:{
+          x:{ticks:{color:"#64748b",maxTicksLimit:12},grid:{color:"#1a2332"},title:{display:true,text:"Age",color:"#64748b"}},
+          y:{ticks:{color:"#64748b",callback:v=>v>=1e6?`$${(v/1e6).toFixed(1)}M`:v>=1e3?`$${(v/1e3).toFixed(0)}K`:`$${v}`},grid:{color:"#1a2332"}}
+        }
+      }
+    });
+    return()=>{ch.current?.destroy();ch.current=null;};
+  },[results]);
+  return h("div",{style:{height:360}},h("canvas",{ref}));
+}
+
+function BarChartC({data}){
+  const ref=useRef(null);const ch=useRef(null);
+  useEffect(()=>{
+    if(!data||!ref.current)return;
+    if(ch.current){ch.current.destroy();ch.current=null;}
+    ch.current=new Chart(ref.current.getContext("2d"),{
+      type:"bar",
+      data:{labels:data.map(d=>d.label),datasets:[{
+        data:data.map(d=>+(d.sr*100).toFixed(1)),
+        backgroundColor:data.map(d=>d.sr>=.9?"rgba(16,185,129,.8)":d.sr>=.75?"rgba(245,158,11,.8)":"rgba(239,68,68,.8)"),
+        borderRadius:6,borderSkipped:false,
+      }]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{backgroundColor:"#0f172a",borderColor:"#334155",borderWidth:1,callbacks:{label:c=>`${c.parsed.y.toFixed(1)}%`}}},
+        scales:{x:{ticks:{color:"#94a3b8",font:{size:10}},grid:{display:false}},y:{min:0,max:100,ticks:{color:"#64748b",callback:v=>`${v}%`},grid:{color:"#1a2332"}}}
+      }
+    });
+    return()=>{ch.current?.destroy();ch.current=null;};
+  },[data]);
+  return h("div",{style:{height:200}},h("canvas",{ref}));
+}
+
+function DonutC({td,at,re}){
+  const ref=useRef(null);const ch=useRef(null);
+  const total=td+at+re;
+  useEffect(()=>{
+    if(!ref.current||total<=0)return;
+    if(ch.current){ch.current.destroy();ch.current=null;}
+    const vals=[td,at,re].filter(v=>v>0);
+    const labs=["Tax-Deferred","After-Tax","Real Estate"].filter((_,i)=>[td,at,re][i]>0);
+    ch.current=new Chart(ref.current.getContext("2d"),{
+      type:"doughnut",
+      data:{labels:labs,datasets:[{data:vals,backgroundColor:["#6366f1","#10b981","#f59e0b"],borderColor:"#020617",borderWidth:3}]},
+      options:{responsive:true,maintainAspectRatio:false,cutout:"65%",
+        plugins:{legend:{position:"bottom",labels:{color:"#94a3b8",font:{size:10},boxWidth:10,padding:8}},
+          tooltip:{backgroundColor:"#0f172a",callbacks:{label:c=>`${c.label}: ${fmt(c.parsed)} (${((c.parsed/total)*100).toFixed(0)}%)`}}}}
+    });
+    return()=>{ch.current?.destroy();ch.current=null;};
+  },[td,at,re]);
+  if(total<=0)return null;
+  return h("div",{style:{height:190}},h("canvas",{ref}));
+}
+
+/* ── Field component — FIXED: each field is fully independent ── */
+function Field({label,value,onChange,prefix,suffix,step=1,min=0,amber,big,note,readOnly}){
+  const[local,setLocal]=useState(String(value));
+  // sync when parent value changes (e.g. reset)
+  useEffect(()=>{setLocal(String(value));},[value]);
+  const commit=v=>{const n=parseFloat(v);if(!isNaN(n))onChange(n);};
+  return h("div",{style:{display:"flex",flexDirection:"column",gap:3,minWidth:0}},
+    h("span",{style:{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1.2,color:amber?"#fbbf24":"#94a3b8",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},label),
+    note&&h("span",{style:{fontSize:9,color:"#475569"}},note),
+    h("div",{style:{display:"flex",alignItems:"center",borderRadius:10,border:`1px solid ${amber?"rgba(251,191,36,.7)":"rgba(71,85,105,.5)"}`,background:readOnly?"#0a0f1e":"#0f172a",overflow:"hidden",boxShadow:amber?"0 0 0 2px rgba(251,191,36,.1)":"none"}},
+      prefix&&h("span",{style:{padding:"0 8px",color:"#64748b",fontSize:12,borderRight:"1px solid #1e293b",flexShrink:0,whiteSpace:"nowrap",lineHeight:"36px"}},prefix),
+      h("input",{
+        type:"number",value:local,step,min,readOnly,
+        onChange:e=>{setLocal(e.target.value);},
+        onBlur:e=>{commit(e.target.value);setLocal(String(parseFloat(e.target.value)||value));},
+        onKeyDown:e=>{if(e.key==="Enter")commit(e.target.value);},
+        style:{flex:1,minWidth:0,padding:big?"10px 8px":"6px 8px",background:"transparent",border:"none",outline:"none",
+          color:readOnly?"#64748b":"white",fontWeight:600,fontSize:big?20:13,textAlign:"right"}}),
+      suffix&&h("span",{style:{padding:"0 8px",color:"#64748b",fontSize:12,borderLeft:"1px solid #1e293b",flexShrink:0,lineHeight:"36px"}},suffix)
+    )
+  );
+}
+
+function KPI({label,value,sub,color="blue",large}){
+  const bg={blue:"linear-gradient(135deg,#1d4ed8,#1e40af)",green:"linear-gradient(135deg,#059669,#047857)",red:"linear-gradient(135deg,#dc2626,#b91c1c)",amber:"linear-gradient(135deg,#d97706,#b45309)",purple:"linear-gradient(135deg,#7c3aed,#6d28d9)"}[color]||"linear-gradient(135deg,#1d4ed8,#1e40af)";
+  return h("div",{style:{background:bg,borderRadius:16,padding:14,color:"white",boxShadow:"0 4px 16px rgba(0,0,0,.4)"}},
+    h("div",{style:{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1.2,opacity:.7,marginBottom:3}},label),
+    h("div",{style:{fontWeight:900,fontSize:large?26:17,lineHeight:1.2}},value),
+    sub&&h("div",{style:{fontSize:10,opacity:.6,marginTop:3}},sub)
+  );
+}
+
+/* ── Asset Row — simple, independent inputs for each sub-account ── */
+function AssetSection({accent,rgb,title,note,sub1Label,sub1,onSub1,sub2Label,sub2,onSub2,mk}){
+  const total=sub1+sub2;
+  return h("div",{style:{background:`rgba(${rgb},.07)`,border:`1px solid rgba(${rgb},.3)`,borderRadius:16,padding:14}},
+    h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},
+      h("span",{style:{color:accent,fontWeight:700,fontSize:11,textTransform:"uppercase",letterSpacing:1.2}},title),
+      h("span",{style:{color:accent,fontWeight:900,fontSize:15}},fmt(total))
+    ),
+    h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}},
+      h(Field,{label:sub1Label,value:sub1,onChange:v=>mk(onSub1)(v),prefix:"$",step:5000,note:"",min:0}),
+      h(Field,{label:sub2Label,value:sub2,onChange:v=>mk(onSub2)(v),prefix:"$",step:5000,note:"",min:0})
+    ),
+    h("div",{style:{fontSize:10,color:"#475569"}},note)
+  );
+}
+
+/* ── Main App ── */
+function App(){
+  /* primary */
+  const[curAge,setCurAge]=useState(45);
+  const[lifeAge,setLifeAge]=useState(90);
+  const[inflation,setInflation]=useState(3.0);
+  /* portfolio — INDEPENDENT sub-accounts */
+  const[k401,setK401]=useState(1625000);    // 401k/403b
+  const[ira,setIra]=useState(875000);       // Traditional IRA → taxDef = k401+ira
+  const[broker,setBroker]=useState(1350000);// Brokerage
+  const[roth,setRoth]=useState(450000);     // Roth → afterTax = broker+roth
+  const[homEq,setHomEq]=useState(240000);   // Home equity
+  const[invProp,setInvProp]=useState(160000);// Investment property → realEst = homEq+invProp
+  /* savings */
+  const[retAge,setRetAge]=useState(65);
+  const[annC,setAnnC]=useState(200000);
+  const[cGr,setCGr]=useState(2.0);
+  const[retSpend,setRetSpend]=useState(120000);
+  const[ssInc,setSsInc]=useState(60000);
+  const[ssStart,setSsStart]=useState(67);
+  /* market */
+  const[stockR,setStockR]=useState(7.0);
+  const[bondR,setBondR]=useState(4.0);
+  const[reR,setReR]=useState(4.5);
+  const[sPre,setSPre]=useState(70);
+  const[sRet,setSRet]=useState(55);
+  const[sigS,setSigS]=useState(15);
+  const[sigB,setSigB]=useState(7);
+  /* recession */
+  const[recEvery,setRecEvery]=useState(15);
+  const[recDrop,setRecDrop]=useState(35);
+  const[recRec,setRecRec]=useState(18);
+  const[earlyRec,setEarlyRec]=useState("none");
+  /* ui */
+  const[results,setResults]=useState(null);
+  const[scen,setScen]=useState(null);
+  const[running,setRunning]=useState(false);
+  const[stale,setStale]=useState(false);
+  const[tab,setTab]=useState("dashboard");
+  const[sTab,setSTab]=useState("retire");
+
+  /* computed totals */
+  const taxDef=k401+ira;
+  const afterTax=broker+roth;
+  const realEst=homEq+invProp;
+  const total=taxDef+afterTax+realEst;
+  const rePct=total>0?realEst/total:0;
+
+  const mk=s=>v=>{s(v);setStale(true);};
+
+  const buildP=useCallback(()=>({
+    curAge,lifeAge,inflation:inflation/100,
+    initPort:total,annContrib:annC,contribGrowth:cGr/100,
+    ssIncome:ssInc,ssStartAge:ssStart,retSpend,retAge,
+    stockRet:stockR/100,bondRet:bondR/100,reEstRet:reR/100,
+    stockPre:sPre/100,stockRetAlloc:sRet/100,reEstPct:rePct,
+    stdStock:sigS/100,stdBond:sigB/100,
+    recEvery,recDrop:recDrop/100,recRecov:recRec/100,earlyRec,
+    taxDef,afterTax,realEst,
+  }),[curAge,lifeAge,inflation,total,annC,cGr,retSpend,ssInc,ssStart,retAge,stockR,bondR,reR,sPre,sRet,rePct,sigS,sigB,recEvery,recDrop,recRec,earlyRec,taxDef,afterTax,realEst]);
+
+  const simulate=useCallback(()=>{
+    setRunning(true);
+    setTimeout(()=>{
+      const p=buildP();
+      const r=runMC(p,1000);
+      setResults(r);setScen(r?buildScen(p):null);
+      setRunning(false);setStale(false);
+    },30);
+  },[buildP]);
+
+  const ya=retAge-curAge,yd=lifeAge-retAge;
+  const need4=retSpend/.04;
+  const med=results?.par.p50||0;
+  const sr=results?.sr??null;
+  const W={maxWidth:980,margin:"0 auto",padding:"0 14px"};
+
+  /* ── render ── */
+  return h(Fragment,null,
+
+    /* topbar */
+    h("div",{style:{background:"linear-gradient(90deg,#0f172a,#1e3a5f,#0f172a)",borderBottom:"1px solid #1e293b",padding:"12px 16px"}},
+      h("div",{style:{...W,display:"flex",flexWrap:"wrap",alignItems:"center",justifyContent:"space-between",gap:8}},
+        h("div",null,
+          h("div",{style:{fontSize:18,fontWeight:900}},"🏦 Retirement Planner"),
+          h("div",{style:{fontSize:11,color:"#64748b"}},"Monte Carlo · Asset Breakdown · Recession · 1,000 Scenarios")
+        ),
+        h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+          sr!==null&&h("div",{style:{padding:"6px 14px",borderRadius:10,fontWeight:700,fontSize:12,
+            background:sr>=.9?"rgba(16,185,129,.12)":sr>=.75?"rgba(245,158,11,.12)":"rgba(239,68,68,.12)",
+            color:sr>=.9?"#6ee7b7":sr>=.75?"#fcd34d":"#fca5a5",
+            border:`1px solid ${sr>=.9?"#10b98140":sr>=.75?"#f59e0b40":"#ef444440"}`}},
+            `${sr>=.9?"✅":sr>=.75?"⚠️":"❌"} Survival: ${fmtPct(sr)}${stale?" (stale)":""}`
+          ),
+          /* Excel download */
+          h("button",{onClick:()=>exportExcel(buildP(),results,scen),
+            style:{padding:"6px 14px",borderRadius:10,background:"rgba(16,185,129,.15)",border:"1px solid rgba(16,185,129,.3)",color:"#6ee7b7",fontWeight:700,fontSize:12}},
+            "⬇️ Export Excel"
+          )
+        )
+      )
+    ),
+
+    /* nav */
+    h("div",{style:{borderBottom:"1px solid #1e293b",background:"rgba(15,23,42,.8)"}},
+      h("div",{style:{...W,display:"flex",gap:2,paddingTop:6,overflowX:"auto"}},
+        [["dashboard","🏠 Dashboard"],["results","📊 Results"],["chart","📈 Chart"],["scenarios","🔀 Scenarios"]]
+        .map(([k,l])=>h("button",{key:k,onClick:()=>setTab(k),
+          style:{padding:"7px 16px",borderRadius:"8px 8px 0 0",fontSize:12,fontWeight:700,border:"none",
+            borderBottom:tab===k?"2px solid #60a5fa":"2px solid transparent",
+            background:tab===k?"#1e293b":"transparent",color:tab===k?"#93c5fd":"#64748b",whiteSpace:"nowrap"}},l))
+      )
+    ),
+
+    /* content */
+    h("div",{id:"main-content",style:{...W,paddingTop:16}},
+
+      /* ══ DASHBOARD ══ */
+      tab==="dashboard"&&h("div",{style:{display:"flex",flexDirection:"column",gap:14}},
+
+        /* Primary 3 — fixed overflow with minWidth:0 on each cell */
+        h("div",{style:{background:"linear-gradient(135deg,#1e293b,#0f172a)",border:"1px solid rgba(251,191,36,.3)",borderRadius:18,padding:16}},
+          h("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:12}},
+            h("span",null,"⭐"),
+            h("span",{style:{color:"#fbbf24",fontWeight:900,fontSize:11,textTransform:"uppercase",letterSpacing:2}},"Three Primary Inputs")
+          ),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}},
+            h("div",{style:{minWidth:0}},h(Field,{label:"Current Age",value:curAge,onChange:mk(setCurAge),suffix:"yrs",amber:true,big:true})),
+            h("div",{style:{minWidth:0}},h(Field,{label:"Life Expectancy",value:lifeAge,onChange:mk(setLifeAge),suffix:"yrs",amber:true,big:true})),
+            h("div",{style:{minWidth:0}},h(Field,{label:"Inflation Rate",value:inflation,onChange:mk(setInflation),suffix:"%",step:.1,amber:true,big:true}))
+          )
+        ),
+
+        /* Portfolio breakdown — donut beside asset blocks */
+        h("div",{style:{background:"rgba(30,41,59,.55)",border:"1px solid rgba(99,102,241,.35)",borderRadius:18,padding:16}},
+          h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}},
+            h("span",{style:{color:"#a5b4fc",fontWeight:700,fontSize:11,textTransform:"uppercase",letterSpacing:1.2}},"🏦 Portfolio — Asset Breakdown"),
+            h("span",{style:{fontWeight:900,fontSize:18,color:"white"}},fmt(total))
+          ),
+
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 170px",gap:14}},
+
+            /* left: 3 asset blocks stacked */
+            h("div",{style:{display:"flex",flexDirection:"column",gap:10}},
+
+              /* Tax-Deferred */
+              h(AssetSection,{accent:"#a5b4fc",rgb:"99,102,241",title:"Tax-Deferred",
+                note:"Taxed as ordinary income on withdrawal · RMDs required at age 73",
+                sub1Label:"401(k) / 403(b) / TSP",sub1:k401,onSub1:setK401,
+                sub2Label:"Traditional IRA / SEP-IRA",sub2:ira,onSub2:setIra,mk}),
+
+              /* After-Tax */
+              h(AssetSection,{accent:"#6ee7b7",rgb:"16,185,129",title:"After-Tax",
+                note:"Brokerage: long-term cap gains · Roth: tax-free growth & withdrawals",
+                sub1Label:"Brokerage / Taxable",sub1:broker,onSub1:setBroker,
+                sub2Label:"Roth IRA / Roth 401(k)",sub2:roth,onSub2:setRoth,mk}),
+
+              /* Real Estate */
+              h(AssetSection,{accent:"#fcd34d",rgb:"245,158,11",title:"Real Estate",
+                note:`Modeled at ${reR}%/yr appreciation · Partially illiquid in simulation`,
+                sub1Label:"Primary Home Equity",sub1:homEq,onSub1:setHomEq,
+                sub2Label:"Investment Properties",sub2:invProp,onSub2:setInvProp,mk})
+            ),
+
+            /* right: donut */
+            h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+              h("span",{style:{fontSize:10,color:"#64748b",textAlign:"center",textTransform:"uppercase",letterSpacing:1}},"Allocation"),
+              h(DonutC,{td:taxDef,at:afterTax,re:realEst}),
+              h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4,marginTop:4}},
+                [[taxDef,"Tax-Def","#a5b4fc"],[afterTax,"After-Tax","#6ee7b7"],[realEst,"Real Est.","#fcd34d"]]
+                .map(([v,l,c])=>h("div",{key:l,style:{textAlign:"center",padding:"6px 4px",background:"rgba(255,255,255,.04)",borderRadius:8}},
+                  h("div",{style:{fontSize:9,color:"#64748b"}},l),
+                  h("div",{style:{fontSize:11,fontWeight:700,color:c}},total>0?fmtP(v/total):"—")
+                ))
+              )
+            )
+          )
+        ),
+
+        /* Savings & Income */
+        h("div",{className:"card"},
+          h("div",{style:{fontSize:11,fontWeight:700,color:"#cbd5e1",textTransform:"uppercase",letterSpacing:1.2,marginBottom:12}},"💰 Savings, Income & Spending"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))",gap:10}},
+            h(Field,{label:"Retirement Age",value:retAge,onChange:mk(setRetAge),suffix:"yrs"}),
+            h(Field,{label:"Annual Contribution",value:annC,onChange:mk(setAnnC),prefix:"$",step:5000}),
+            h(Field,{label:"Contribution Growth",value:cGr,onChange:mk(setCGr),suffix:"%",step:.5}),
+            h(Field,{label:"Annual Spending",value:retSpend,onChange:mk(setRetSpend),prefix:"$",step:5000}),
+            h(Field,{label:"SS / Pension Income",value:ssInc,onChange:mk(setSsInc),prefix:"$",step:1000}),
+            h(Field,{label:"SS Start Age",value:ssStart,onChange:mk(setSsStart),suffix:"yrs"})
+          )
+        ),
+
+        /* Market */
+        h("div",{className:"card"},
+          h("div",{style:{fontSize:11,fontWeight:700,color:"#cbd5e1",textTransform:"uppercase",letterSpacing:1.2,marginBottom:12}},"📈 Market Assumptions"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))",gap:10}},
+            h(Field,{label:"Stock Return %/yr",value:stockR,onChange:mk(setStockR),suffix:"%",step:.1}),
+            h(Field,{label:"Bond Return %/yr",value:bondR,onChange:mk(setBondR),suffix:"%",step:.1}),
+            h(Field,{label:"RE Return %/yr",value:reR,onChange:mk(setReR),suffix:"%",step:.1}),
+            h(Field,{label:"Stock Alloc Accum.",value:sPre,onChange:mk(setSPre),suffix:"%",step:5}),
+            h(Field,{label:"Stock Alloc Distrib.",value:sRet,onChange:mk(setSRet),suffix:"%",step:5}),
+            h(Field,{label:"Stock Volatility σ",value:sigS,onChange:mk(setSigS),suffix:"%",step:1}),
+            h(Field,{label:"Bond Volatility σ",value:sigB,onChange:mk(setSigB),suffix:"%",step:1})
+          )
+        ),
+
+        /* Recession */
+        h("div",{className:"card",style:{border:"1px solid rgba(153,27,27,.5)"}},
+          h("div",{style:{fontSize:11,fontWeight:700,color:"#fca5a5",textTransform:"uppercase",letterSpacing:1.2,marginBottom:12}},"📉 Recession Modeling"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))",gap:10,marginBottom:14}},
+            h(Field,{label:"Recession Every N Yrs (0=off)",value:recEvery,onChange:mk(setRecEvery),suffix:"yrs",min:0}),
+            h(Field,{label:"Portfolio Drop Yr 1",value:recDrop,onChange:mk(setRecDrop),suffix:"%"}),
+            h(Field,{label:"Recovery Yr 2",value:recRec,onChange:mk(setRecRec),suffix:"%"})
+          ),
+          h("div",{style:{fontSize:10,color:"#f87171",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:6}},"Early-Retirement Recession Scenario"),
+          h("div",{style:{fontSize:10,color:"#64748b",marginBottom:10}},"Force a crash in the first 3 years — tests sequence-of-returns risk"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}},
+            [["none","✅","None","Baseline"],["y0","📉","Yr 1","Crash immediately"],["y1","📉","Yr 2","1yr in"],["y2","📉","Yr 3","2yrs in"]]
+            .map(([k,ic,l,d])=>h("button",{key:k,onClick:()=>mk(setEarlyRec)(k),
+              style:{borderRadius:12,padding:"10px 6px",textAlign:"left",border:`2px solid ${earlyRec===k?"#ef4444":"rgba(71,85,105,.4)"}`,background:earlyRec===k?"rgba(239,68,68,.12)":"rgba(15,23,42,.5)",color:earlyRec===k?"white":"#94a3b8"}},
+              h("div",{style:{fontSize:16,marginBottom:4}},ic),
+              h("div",{style:{fontWeight:700,fontSize:11}},l),
+              h("div",{style:{fontSize:9,opacity:.6}},d)
+            ))
+          )
+        ),
+
+        /* quick stats */
+        h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}},
+          [[`${Math.max(ya,0)} yrs`,"Yrs to Retire",ya>=10?"#10b981":"#f59e0b"],
+           [`${Math.max(yd,0)} yrs`,"Yrs in Retirement",yd>=20?"#10b981":"#f59e0b"],
+           [fmt(need4),"Target Nest Egg (4%)","#60a5fa"]]
+          .map(([v,l,c])=>h("div",{key:l,style:{background:"rgba(30,41,59,.4)",border:"1px solid rgba(71,85,105,.35)",borderRadius:12,padding:"10px",textAlign:"center"}},
+            h("div",{style:{fontSize:10,color:"#64748b",marginBottom:3}},l),
+            h("div",{style:{fontWeight:900,fontSize:18,color:c}},v)
+          ))
+        ),
+
+        /* last-run summary (only shown after first simulation) */
+        results&&!stale&&h("div",{style:{borderRadius:16,padding:16,border:`1px solid ${sr>=.9?"rgba(16,185,129,.35)":"rgba(245,158,11,.35)"}`,background:sr>=.9?"rgba(16,185,129,.06)":"rgba(245,158,11,.06)"}},
+          h("div",{style:{fontSize:12,fontWeight:700,textAlign:"center",marginBottom:12}},sr>=.9?"✅ Excellent — Last Simulation":"⚠️ Review recommended — Last Simulation"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,textAlign:"center"}},
+            [[fmtPct(sr),"Survival Rate",sr>=.9?"#6ee7b7":"#fcd34d"],[fmt(med),"Median @ Retire","#93c5fd"],[fmt(med*.04),"Safe Income/yr",med*.04>=retSpend?"#6ee7b7":"#fca5a5"]]
+            .map(([v,l,c])=>h("div",{key:l},h("div",{style:{fontSize:10,color:"#64748b",marginBottom:2}},l),h("div",{style:{fontWeight:900,fontSize:20,color:c}},v)))
+          ),
+          h("div",{style:{display:"flex",justifyContent:"center",gap:8,marginTop:12}},
+            [["results","View Results"],["chart","Chart"],["scenarios","Scenarios"]]
+            .map(([t,l])=>h("button",{key:t,onClick:()=>setTab(t),style:{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:700,border:"none",background:"rgba(255,255,255,.07)",color:"#cbd5e1"}},l))
+          )
+        ),
+
+        h("div",{style:{textAlign:"center",color:"#334155",fontSize:10,paddingBottom:4}},"⚠️ Educational purposes only · Not financial advice · Consult a licensed CFP/RIA")
+      ), /* end dashboard */
+
+      /* ══ RESULTS ══ */
+      tab==="results"&&(!results
+        ?h("div",{style:{textAlign:"center",paddingTop:80}},h("div",{style:{fontSize:60,marginBottom:16}},"🎲"),h("button",{onClick:()=>setTab("dashboard"),style:{padding:"10px 24px",borderRadius:12,background:"#2563eb",color:"white",fontWeight:700,border:"none"}},"Go to Dashboard"))
+        :h("div",{style:{display:"flex",flexDirection:"column",gap:14}},
+            h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}},
+              [[taxDef,"Tax-Deferred","#6366f1","rgba(99,102,241,.1)"],[afterTax,"After-Tax","#10b981","rgba(16,185,129,.1)"],[realEst,"Real Estate","#f59e0b","rgba(245,158,11,.1)"]]
+              .map(([v,l,c,bg])=>h("div",{key:l,style:{borderRadius:12,padding:"12px",background:bg,border:`1px solid ${c}40`,textAlign:"center"}},
+                h("div",{style:{fontSize:10,color:"#94a3b8",marginBottom:3}},l),
+                h("div",{style:{fontWeight:900,fontSize:16,color:c}},fmt(v)),
+                h("div",{style:{fontSize:10,color:"#64748b"}},total>0?fmtP(v/total):"0%"," of total")
+              ))
+            ),
+            h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}},
+              h(KPI,{label:"Survival Rate",value:fmtPct(sr),sub:`lasts to age ${lifeAge}`,color:sr>=.9?"green":sr>=.75?"amber":"red",large:true}),
+              h(KPI,{label:"Ruin Probability",value:fmtPct(results.ruin),sub:"depleted before death",color:results.ruin<.05?"green":results.ruin<.2?"amber":"red"}),
+              h(KPI,{label:"Median @ Retire",value:fmt(med),sub:`age ${retAge}`,color:"purple"}),
+              h(KPI,{label:"4% Safe Income",value:fmt(med*.04),sub:"median scenario/yr",color:med*.04>=retSpend?"green":"red"})
+            ),
+            h("div",{className:"card"},
+              h("div",{style:{fontWeight:700,marginBottom:10}},"📊 Portfolio at Retirement — Percentile Breakdown"),
+              h("div",{style:{overflowX:"auto"}},
+                h("table",null,
+                  h("thead",null,h("tr",null,["Scenario","Portfolio","4% Withdrawal","Covers Spending?","Surplus / (Deficit)"].map((c,i)=>h("th",{key:c,className:i>0?"r":""},c)))),
+                  h("tbody",null,
+                    [["5th %ile — Severe bear",results.par.p5,"#fca5a5"],["25th %ile — Below avg",results.par.p25,"#fdba74"],["Median — Base case",results.par.p50,"#93c5fd"],["75th %ile — Above avg",results.par.p75,"#6ee7b7"],["95th %ile — Bull run",results.par.p95,"#34d399"]]
+                    .map(([l,port,c])=>{const ok=port*.04>=retSpend;return h("tr",{key:l},
+                      h("td",{style:{color:c,fontWeight:700}},l),h("td",{className:"r"},fmtFull(port)),
+                      h("td",{className:"r"},fmtFull(port*.04)),
+                      h("td",{style:{color:ok?"#6ee7b7":"#fca5a5"}},ok?"✅ Yes":"❌ No"),
+                      h("td",{className:"r",style:{fontWeight:700,color:ok?"#6ee7b7":"#fca5a5"}},(ok?"+":"")+fmtFull(port*.04-retSpend))
+                    );})
+                  )
+                )
+              )
+            ),
+            h("div",{className:"card"},
+              h("div",{style:{fontWeight:700,marginBottom:10}},`🏛️ Estate Value at Age ${lifeAge}`),
+              h("div",{style:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}},
+                [["5th",results.pfin.p5],["25th",results.pfin.p25],["Med",results.pfin.p50],["75th",results.pfin.p75],["95th",results.pfin.p95]]
+                .map(([l,v])=>h("div",{key:l,style:{borderRadius:10,padding:"10px 6px",textAlign:"center",border:v>0?"1px solid rgba(16,185,129,.3)":"1px solid rgba(239,68,68,.3)",background:v>0?"rgba(16,185,129,.07)":"rgba(239,68,68,.07)"}},
+                  h("div",{style:{fontSize:10,color:"#64748b",marginBottom:3}},`${l} %ile`),
+                  h("div",{style:{fontWeight:900,fontSize:13,color:v>0?"#6ee7b7":"#fca5a5"}},fmt(v))
+                ))
+              )
+            )
+          )
+      ),
+
+      /* ══ CHART ══ */
+      tab==="chart"&&(!results
+        ?h("div",{style:{textAlign:"center",paddingTop:80}},h("div",{style:{fontSize:60,marginBottom:16}},"📈"),h("button",{onClick:()=>setTab("dashboard"),style:{padding:"10px 24px",borderRadius:12,background:"#2563eb",color:"white",fontWeight:700,border:"none"}},"Run Simulation First"))
+        :h("div",{style:{display:"flex",flexDirection:"column",gap:14}},
+            h("div",{className:"card"},
+              h("div",{style:{fontWeight:700,marginBottom:4}},"📈 Portfolio Trajectory — Percentile Fan"),
+              h("div",{style:{fontSize:11,color:"#64748b",marginBottom:14}},"Shaded band = 25th–75th %ile. Blue = median. 🟡 vertical = retirement. Red verticals = recession years."),
+              h(LineChartC,{results})
+            ),
+            h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}},
+              [["Best (95th @ Retire)",results.par.p95,"#34d399"],["Median (50th @ Retire)",results.par.p50,"#93c5fd"],["Worst (5th @ Retire)",results.par.p5,"#fca5a5"]]
+              .map(([l,v,c])=>h("div",{key:l,className:"card"},h("div",{style:{fontSize:10,color:"#64748b",marginBottom:4}},l),h("div",{style:{fontWeight:900,fontSize:20,color:c}},fmt(v))))
+            )
+          )
+      ),
+
+      /* ══ SCENARIOS ══ */
+      tab==="scenarios"&&(!scen
+        ?h("div",{style:{textAlign:"center",paddingTop:80}},h("div",{style:{fontSize:60,marginBottom:16}},"🔀"),h("button",{onClick:()=>setTab("dashboard"),style:{padding:"10px 24px",borderRadius:12,background:"#2563eb",color:"white",fontWeight:700,border:"none"}},"Run Simulation First"))
+        :h("div",{style:{display:"flex",flexDirection:"column",gap:14}},
+            h("div",{style:{display:"flex",gap:4,background:"rgba(30,41,59,.5)",borderRadius:12,padding:4,overflowX:"auto"}},
+              [["retire","🎯 Retire Age"],["spend","💸 Spending"],["infl","📈 Inflation"],["contrib","💰 Contributions"],["recession","📉 Recession"]]
+              .map(([k,l])=>h("button",{key:k,onClick:()=>setSTab(k),style:{flex:1,minWidth:"fit-content",padding:"7px 10px",borderRadius:8,fontSize:12,fontWeight:700,border:"none",whiteSpace:"nowrap",background:sTab===k?"#2563eb":"transparent",color:sTab===k?"white":"#64748b"}},l))
+            ),
+
+            sTab==="retire"&&h("div",{className:"card"},
+              h("b",null,"🎯 Retirement Age Sensitivity"),h("div",{style:{fontSize:10,color:"#64748b",margin:"4px 0 12px"}},"★ = your selection"),
+              h("div",{style:{overflowX:"auto"}},h("table",null,
+                h("thead",null,h("tr",null,["Retire At","Yrs","Portfolio","4% Income/yr","vs Spending","Status"].map((c,i)=>h("th",{key:c,className:i>0&&i<5?"r":""},c)))),
+                h("tbody",null,scen.ret.map(r=>h("tr",{key:r.age,style:{background:r.mine?"rgba(37,99,235,.1)":""}},
+                  h("td",{style:{color:r.mine?"#93c5fd":"",fontWeight:700}},`Age ${r.age}${r.mine?" ★":""}`),
+                  h("td",{className:"r"},r.yrs),h("td",{className:"r",style:{fontWeight:700}},fmtFull(r.port)),
+                  h("td",{className:"r"},fmtFull(r.w4)),
+                  h("td",{className:"r",style:{fontWeight:700,color:r.sur>=0?"#6ee7b7":"#fca5a5"}},(r.sur>=0?"+":"")+fmtFull(r.sur)),
+                  h("td",{style:{color:r.ok?"#6ee7b7":"#fca5a5"}},r.ok?"✅ Funded":"❌ Shortfall")
+                )))
+              ))
+            ),
+
+            sTab==="spend"&&h("div",{className:"card"},
+              h("b",null,"💸 Spending Sensitivity"),h("div",{style:{fontSize:10,color:"#64748b",margin:"4px 0 12px"}},"★ = your level"),
+              h("div",{style:{overflowX:"auto"}},h("table",null,
+                h("thead",null,h("tr",null,["Annual Spend","Monthly","Nest Egg Needed","Your Portfolio","Surplus/(Deficit)","Status"].map((c,i)=>h("th",{key:c,className:i>0&&i<5?"r":""},c)))),
+                h("tbody",null,scen.spe.map(r=>h("tr",{key:r.sp,style:{background:r.mine?"rgba(37,99,235,.1)":""}},
+                  h("td",{style:{color:r.mine?"#93c5fd":"",fontWeight:700}},`${fmtFull(r.sp)}${r.mine?" ★":""}`),
+                  h("td",{className:"r"},fmtFull(r.sp/12)),h("td",{className:"r"},fmtFull(r.r4)),h("td",{className:"r",style:{fontWeight:700}},fmtFull(r.port)),
+                  h("td",{className:"r",style:{fontWeight:700,color:r.sur>=0?"#6ee7b7":"#fca5a5"}},(r.sur>=0?"+":"")+fmtFull(r.sur)),
+                  h("td",{style:{color:r.ok?"#6ee7b7":"#fca5a5"}},r.ok?"✅ Covered":"❌ Shortfall")
+                )))
+              ))
+            ),
+
+            sTab==="infl"&&h("div",{className:"card"},
+              h("b",null,"📈 Inflation Sensitivity"),h("div",{style:{fontSize:10,color:"#64748b",margin:"4px 0 12px"}},"★ = your rate"),
+              h("div",{style:{overflowX:"auto"}},h("table",null,
+                h("thead",null,h("tr",null,["Inflation","$120K Worth in 20yr","Nominal Spend @ Retire","Real Return","Nest Egg Needed"].map((c,i)=>h("th",{key:c,className:i>0?"r":""},c)))),
+                h("tbody",null,scen.inf.map(r=>h("tr",{key:r.inf,style:{background:r.mine?"rgba(37,99,235,.1)":""}},
+                  h("td",{style:{color:r.mine?"#93c5fd":r.inf>.05?"#fca5a5":"",fontWeight:700}},`${fmtPct(r.inf)}${r.mine?" ★":""}`),
+                  h("td",{className:"r",style:{color:r.inf>.05?"#fca5a5":""}},fmtFull(r.w20)),h("td",{className:"r"},fmtFull(r.ns)),
+                  h("td",{className:"r",style:{fontWeight:700,color:r.rr>.03?"#6ee7b7":r.rr>0?"#fcd34d":"#fca5a5"}},fmtPct(r.rr)),
+                  h("td",{className:"r",style:{color:r.inf>.05?"#fca5a5":""}},fmtFull(r.nest))
+                )))
+              ))
+            ),
+
+            sTab==="contrib"&&h("div",{className:"card"},
+              h("b",null,"💰 Contribution Sensitivity"),h("div",{style:{fontSize:10,color:"#64748b",margin:"4px 0 12px"}},"★ = your amount"),
+              h("div",{style:{overflowX:"auto"}},h("table",null,
+                h("thead",null,h("tr",null,["Annual Contrib","Monthly","Portfolio @ Retire","Surplus/(Deficit)","Status"].map((c,i)=>h("th",{key:c,className:i>0&&i<4?"r":""},c)))),
+                h("tbody",null,scen.con.map(r=>h("tr",{key:r.c,style:{background:r.mine?"rgba(37,99,235,.1)":""}},
+                  h("td",{style:{color:r.mine?"#93c5fd":"",fontWeight:700}},`${fmtFull(r.c)}${r.mine?" ★":""}`),
+                  h("td",{className:"r"},fmtFull(r.c/12)),h("td",{className:"r",style:{fontWeight:700}},fmtFull(r.port)),
+                  h("td",{className:"r",style:{fontWeight:700,color:r.sur>=0?"#6ee7b7":"#fca5a5"}},(r.sur>=0?"+":"")+fmtFull(r.sur)),
+                  h("td",{style:{color:r.ok?"#6ee7b7":"#fca5a5"}},r.ok?"✅":"❌")
+                )))
+              ))
+            ),
+
+            sTab==="recession"&&h("div",{style:{display:"flex",flexDirection:"column",gap:12}},
+              h("div",{className:"card",style:{border:"1px solid rgba(153,27,27,.4)"}},
+                h("b",null,"📉 Early-Retirement Recession — Timing Impact"),
+                h("div",{style:{fontSize:10,color:"#64748b",margin:"4px 0 16px"}},"400-scenario mini-sims per timing. ★ = active setting."),
+                h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}},
+                  scen.rec.map(r=>h("div",{key:r.key,style:{borderRadius:14,padding:"12px 8px",textAlign:"center",border:`2px solid ${r.mine?"#3b82f6":"rgba(71,85,105,.4)"}`,background:r.mine?"rgba(37,99,235,.1)":"rgba(15,23,42,.4)"}},
+                    h("div",{style:{fontSize:9,color:"#64748b",textTransform:"uppercase",marginBottom:6,lineHeight:1.4}},r.label+(r.mine?" ★":"")),
+                    h("div",{style:{fontSize:26,fontWeight:900,marginBottom:2,color:r.sr>=.9?"#34d399":r.sr>=.75?"#fcd34d":"#fca5a5"}},fmtPct(r.sr)),
+                    h("div",{style:{fontSize:9,color:"#64748b",marginBottom:6}},"survival rate"),
+                    h("div",{style:{fontSize:12,fontWeight:700,color:"#cbd5e1"}},fmt(r.med)),
+                    h("div",{style:{fontSize:9,color:"#64748b"}},"median @ retire"),
+                    h("div",{style:{fontSize:11,fontWeight:700,color:"#94a3b8",marginTop:3}},fmt(r.fin)),
+                    h("div",{style:{fontSize:9,color:"#64748b"}},"median estate")
+                  ))
+                ),
+                h(BarChartC,{data:scen.rec})
+              ),
+              h("div",{style:{background:"rgba(15,23,42,.7)",border:"1px solid rgba(71,85,105,.3)",borderRadius:12,padding:14,fontSize:11,color:"#94a3b8",lineHeight:1.8}},
+                h("span",{style:{color:"#fcd34d",fontWeight:700}},"Why sequence of returns matters: "),
+                "Selling at depressed prices in years 1–3 permanently reduces share count — you miss the recovery on fewer shares. A plan that survives normal markets can fail with an early crash.",
+                h("br"),h("br"),
+                h("span",{style:{color:"#cbd5e1",fontWeight:700}},"Mitigation: "),
+                "2-yr cash buffer · Dynamic spending cuts · Bond tent at retirement"
+              )
+            )
+          )
+      )
+    ), /* end main content */
+
+    /* ── STICKY SIMULATE BUTTON ── */
+    h("div",{id:"sim-bar"},
+      h("div",{style:{maxWidth:980,margin:"0 auto",display:"flex",gap:10,alignItems:"center"}},
+        h("button",{
+          onClick:simulate,disabled:running,
+          className:stale?"pulse":"",
+          style:{flex:1,padding:"13px 20px",borderRadius:14,fontWeight:900,fontSize:14,color:"white",border:"none",
+            background:stale?"linear-gradient(135deg,#d97706,#ea580c)":"linear-gradient(135deg,#2563eb,#4f46e5)",
+            boxShadow:"0 4px 20px rgba(0,0,0,.5)",opacity:running?.65:1}},
+          running
+            ?h("span",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:8}},
+                h("svg",{className:"spin",width:18,height:18,viewBox:"0 0 24 24",fill:"none"},
+                  h("circle",{cx:12,cy:12,r:10,stroke:"white",strokeWidth:4,strokeOpacity:.25}),
+                  h("path",{fill:"white",d:"M4 12a8 8 0 018-8v8H4z"})
+                ),"Running 1,000 scenarios…")
+            :stale?"⚠️  Assumptions changed — click to Re-Simulate":"🎲  Run Monte Carlo Simulation  (1,000 scenarios)"
+        ),
+        h("button",{onClick:()=>exportExcel(buildP(),results,scen),
+          style:{padding:"13px 18px",borderRadius:14,background:"rgba(16,185,129,.15)",border:"1px solid rgba(16,185,129,.35)",color:"#6ee7b7",fontWeight:700,fontSize:13,whiteSpace:"nowrap"}},
+          "📥 Export Excel"
+        )
+      )
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
