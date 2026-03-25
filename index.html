@@ -7,7 +7,8 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#020617;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;min-height:100vh}
@@ -124,70 +125,193 @@ function buildScen(p){
   return{ret,spe,inf,con,rec};
 }
 
-/* ── Excel export ── */
-function exportExcel(p,results,scen){
-  const WB=XLSX.utils.book_new();
-  // Helper
-  const addSheet=(name,rows)=>XLSX.utils.book_append_sheet(WB,XLSX.utils.aoa_to_sheet(rows),name);
+/* ── Excel export (ExcelJS – professional formatting) ── */
+async function exportExcel(p,results,scen){
+  const wb=new ExcelJS.Workbook();
+  wb.creator='Retirement Planner';
 
-  // Dashboard
-  addSheet("Dashboard",[
-    ["RETIREMENT PLANNER — INPUTS & RESULTS"],[""],
-    ["PRIMARY INPUTS","","VALUE"],
-    ["Current Age","",p.curAge],["Life Expectancy","",p.lifeAge],["Inflation Rate","",p.inflation],[""],
-    ["PORTFOLIO BREAKDOWN","",""],
-    ["Tax-Deferred (401k/IRA)","",p.taxDef],["After-Tax (Brokerage/Roth)","",p.afterTax],["Real Estate Equity","",p.realEst],["Total Portfolio","",p.taxDef+p.afterTax+p.realEst],[""],
-    ["SAVINGS & INCOME","",""],
-    ["Retirement Age","",p.retAge],["Annual Contribution","",p.annContrib],["Annual Spending (Ret.)","",p.retSpend],["SS / Pension Income","",p.ssIncome],["SS Start Age","",p.ssStartAge],[""],
-    ["MARKET ASSUMPTIONS","",""],
-    ["Stock Return","",p.stockRet],["Bond Return","",p.bondRet],["Real Estate Return","",p.reEstRet],["Stock Alloc — Accumulation","",p.stockPre],["Stock Alloc — Distribution","",p.stockRetAlloc],[""],
-    ["RECESSION SETTINGS","",""],
-    ["Recession Every N Years","",p.recEvery],["Portfolio Drop Year 1","",p.recDrop],["Recovery Year 2","",p.recRecov],["Early Ret. Recession","",p.earlyRec],
-  ]);
+  /* ── colour & style constants (matching .xlsm) ── */
+  const C={navy:'1F3864',blue:'2E75B6',green:'375623',ltGreen:'E2EFDA',
+    yellow:'FFFF00',ltGray:'E8E8E8',vlGray:'F5F5F5',ltBlue:'D6E4F0',
+    purple:'7030A0',white:'FFFFFF',black:'000000',blueFont:'0000FF',
+    border:'BFBFBF',dkGray:'595959',gray888:'888888'};
+
+  const fontW=(sz=10,bold=true)=>({name:'Arial',size:sz,bold,color:{argb:C.white}});
+  const fontB=(sz=10,bold=false)=>({name:'Arial',size:sz,bold,color:{argb:C.black}});
+  const fontBl=(sz=10,bold=true)=>({name:'Arial',size:sz,bold,color:{argb:C.blueFont}});
+  const fill=c=>({type:'pattern',pattern:'solid',fgColor:{argb:c}});
+  const alL={vertical:'middle',horizontal:'left'};
+  const alR={vertical:'middle',horizontal:'right'};
+  const alC={vertical:'middle',horizontal:'center'};
+  const thinBdr={style:'thin',color:{argb:C.border}};
+  const bdr={top:thinBdr,bottom:thinBdr,left:thinBdr,right:thinBdr};
+  const $fmt='"$"#,##0';const pFmt='0.0%';const p0Fmt='0%';const iFmt='0';
+
+  /* helper: style a row as title */
+  function titleRow(ws,r,txt,cols,sz=14){
+    ws.mergeCells(r,1,r,cols);
+    const c=ws.getCell(r,1);c.value=txt;c.font=fontW(sz);c.fill=fill(C.navy);c.alignment=alC;
+    ws.getRow(r).height=sz>12?36:28;
+  }
+  /* helper: section header row */
+  function secRow(ws,r,txt,cols,bg=C.blue){
+    ws.mergeCells(r,1,r,cols);
+    const c=ws.getCell(r,1);c.value=txt;c.font=fontW(11);c.fill=fill(bg);c.alignment=alL;
+    ws.getRow(r).height=22;
+  }
+  /* helper: column header row */
+  function hdrRow(ws,r,labels,bg=C.navy){
+    ws.getRow(r).height=22;
+    labels.forEach((l,i)=>{
+      const c=ws.getCell(r,i+1);c.value=l;c.font=fontW(10);c.fill=fill(bg);
+      c.alignment=alC;c.border=bdr;
+    });
+  }
+  /* helper: data row */
+  function dataRow(ws,r,vals,fmts,isMine=false){
+    ws.getRow(r).height=20;
+    vals.forEach((v,i)=>{
+      const c=ws.getCell(r,i+1);c.value=v;
+      c.font=fontB(10);c.fill=fill(isMine?C.ltBlue:C.vlGray);
+      c.border=bdr;c.alignment=(typeof v==='number')?alR:alL;
+      if(fmts&&fmts[i])c.numFmt=fmts[i];
+    });
+  }
+  /* helper: input row (label + yellow value) */
+  function inputRow(ws,r,label,val,fmt,unit){
+    ws.getRow(r).height=20;
+    const a=ws.getCell(r,1);a.value=label;a.font=fontB(10);a.fill=fill(C.vlGray);a.alignment=alL;a.border=bdr;
+    const b=ws.getCell(r,2);b.value=val;b.font=fontBl(11);b.fill=fill(C.yellow);b.alignment=alR;b.border=bdr;
+    if(fmt)b.numFmt=fmt;
+    if(unit){const u=ws.getCell(r,3);u.value=unit;u.font={name:'Arial',size:9,italic:true,color:{argb:C.dkGray}};u.alignment=alL;}
+  }
+  /* helper: calc row (label + gray value) */
+  function calcRow(ws,r,label,val,fmt){
+    ws.getRow(r).height=20;
+    const a=ws.getCell(r,1);a.value=label;a.font=fontB(10,true);a.fill=fill(C.ltGray);a.alignment=alL;a.border=bdr;
+    const b=ws.getCell(r,2);b.value=val;b.font=fontB(10,true);b.fill=fill(C.ltGray);b.alignment=alR;b.border=bdr;
+    if(fmt)b.numFmt=fmt;
+  }
+
+  /* ═══════════ SHEET 1: Dashboard ═══════════ */
+  const ds=wb.addWorksheet('Dashboard');
+  ds.columns=[{width:36},{width:20},{width:12}];
+  let R=1;
+  titleRow(ds,R,'RETIREMENT PLANNER — INPUTS & RESULTS',3,14);R+=2;
+  secRow(ds,R,'PERSONAL INPUTS',3);R++;
+  inputRow(ds,R,'Current Age',p.curAge,iFmt,'years');R++;
+  inputRow(ds,R,'Life Expectancy',p.lifeAge,iFmt,'years');R++;
+  inputRow(ds,R,'Inflation Rate',p.inflation,pFmt);R+=2;
+  secRow(ds,R,'PORTFOLIO BREAKDOWN',3);R++;
+  inputRow(ds,R,'Tax-Deferred (401k/IRA)',p.taxDef,$fmt);R++;
+  inputRow(ds,R,'After-Tax (Brokerage/Roth)',p.afterTax,$fmt);R++;
+  inputRow(ds,R,'Real Estate Equity',p.realEst,$fmt);R++;
+  calcRow(ds,R,'Total Portfolio',p.taxDef+p.afterTax+p.realEst,$fmt);R+=2;
+  secRow(ds,R,'SAVINGS & INCOME',3);R++;
+  inputRow(ds,R,'Retirement Age',p.retAge,iFmt,'years');R++;
+  inputRow(ds,R,'Annual Contribution',p.annContrib,$fmt,'$/yr');R++;
+  inputRow(ds,R,'Annual Spending (Ret.)',p.retSpend,$fmt,'$/yr');R++;
+  inputRow(ds,R,'SS / Pension Income',p.ssIncome,$fmt,'$/yr');R++;
+  inputRow(ds,R,'SS Start Age',p.ssStartAge,iFmt,'years');R+=2;
+  secRow(ds,R,'MARKET ASSUMPTIONS',3);R++;
+  inputRow(ds,R,'Stock Return',p.stockRet,pFmt);R++;
+  inputRow(ds,R,'Bond Return',p.bondRet,pFmt);R++;
+  inputRow(ds,R,'Real Estate Return',p.reEstRet,pFmt);R++;
+  inputRow(ds,R,'Stock Alloc — Accumulation',p.stockPre,p0Fmt);R++;
+  inputRow(ds,R,'Stock Alloc — Distribution',p.stockRetAlloc,p0Fmt);R+=2;
+  secRow(ds,R,'RECESSION SETTINGS',3);R++;
+  inputRow(ds,R,'Recession Every N Years',p.recEvery,iFmt,'years');R++;
+  inputRow(ds,R,'Portfolio Drop Year 1',p.recDrop,pFmt);R++;
+  inputRow(ds,R,'Recovery Year 2',p.recRecov,pFmt);R++;
+  inputRow(ds,R,'Early Ret. Recession',p.earlyRec);R++;
 
   if(results){
-    // MC Results
-    addSheet("Monte Carlo Results",[
-      ["MONTE CARLO SIMULATION — 1,000 SCENARIOS"],[""],
-      ["METRIC","VALUE"],
-      ["Survival Rate",results.sr],["Ruin Probability",results.ruin],[""],
-      ["PORTFOLIO AT RETIREMENT","5th %ile","25th %ile","Median","75th %ile","95th %ile"],
-      ["Portfolio @ Retire",results.par.p5,results.par.p25,results.par.p50,results.par.p75,results.par.p95],
-      ["Portfolio @ End of Life",results.pfin.p5,results.pfin.p25,results.pfin.p50,results.pfin.p75,results.pfin.p95],
-      ["4% Withdrawal/yr",results.par.p5*.04,results.par.p25*.04,results.par.p50*.04,results.par.p75*.04,results.par.p95*.04],
-    ]);
+    /* ═══════════ SHEET 2: MC Results ═══════════ */
+    const mc=wb.addWorksheet('Monte Carlo Results');
+    mc.columns=[{width:32},{width:16},{width:16},{width:16},{width:16},{width:16}];
+    R=1;
+    titleRow(mc,R,'MONTE CARLO SIMULATION — 1,000 SCENARIOS',6,13);R++;
+    const sub=mc.getCell(R,1);mc.mergeCells(R,1,R,6);
+    sub.value='Percentile-based portfolio projections';sub.font={name:'Arial',size:10,italic:true,color:{argb:C.dkGray}};
+    sub.fill=fill(C.ltBlue);sub.alignment=alC;mc.getRow(R).height=18;R+=2;
 
-    // Projection table
-    const projRows=[["Age","5th %ile","25th %ile","Median","75th %ile","95th %ile"]];
+    secRow(mc,R,'SUMMARY STATISTICS',6);R++;
+    hdrRow(mc,R,['Metric','Value','','','','']);R++;
+    dataRow(mc,R,['Survival Rate',results.sr,'','','',''],[null,pFmt]);R++;
+    dataRow(mc,R,['Ruin Probability',results.ruin,'','','',''],[null,pFmt]);R+=2;
+
+    secRow(mc,R,'PORTFOLIO AT RETIREMENT',6);R++;
+    hdrRow(mc,R,['','5th %ile','25th %ile','Median','75th %ile','95th %ile']);R++;
+    dataRow(mc,R,['Portfolio @ Retire',results.par.p5,results.par.p25,results.par.p50,results.par.p75,results.par.p95],[null,$fmt,$fmt,$fmt,$fmt,$fmt]);R++;
+    dataRow(mc,R,['Portfolio @ End of Life',results.pfin.p5,results.pfin.p25,results.pfin.p50,results.pfin.p75,results.pfin.p95],[null,$fmt,$fmt,$fmt,$fmt,$fmt]);R++;
+    dataRow(mc,R,['4% Withdrawal / yr',results.par.p5*.04,results.par.p25*.04,results.par.p50*.04,results.par.p75*.04,results.par.p95*.04],[null,$fmt,$fmt,$fmt,$fmt,$fmt]);R++;
+
+    /* ═══════════ SHEET 3: Projections ═══════════ */
+    const pj=wb.addWorksheet('Projections');
+    pj.columns=[{width:8},{width:16},{width:16},{width:16},{width:16},{width:16}];
+    R=1;
+    titleRow(pj,R,'YEAR-BY-YEAR PORTFOLIO PROJECTIONS',6,13);R+=2;
+    hdrRow(pj,R,['Age','5th %ile','25th %ile','Median','75th %ile','95th %ile']);R++;
     results.chartLabels.forEach((age,i)=>{
-      projRows.push([age,results.p5[i],results.p25[i],results.p50[i],results.p75[i],results.p95[i]]);
+      const mine=(age===results.retAge);
+      dataRow(pj,R,[age,results.p5[i],results.p25[i],results.p50[i],results.p75[i],results.p95[i]],[iFmt,$fmt,$fmt,$fmt,$fmt,$fmt],mine);R++;
     });
-    addSheet("Projection Data",projRows);
   }
 
   if(scen){
-    // Retire age sensitivity
-    const retRows=[["Retire At","Yrs Growth","Portfolio","4% Income/yr","vs Spending","Funded?"]];
-    scen.ret.forEach(r=>retRows.push([r.age,r.yrs,r.port,r.w4,r.sur,r.ok?"Yes":"No"]));
-    addSheet("Retire Age Scenarios",retRows);
+    /* ═══════════ SHEET 4: Retire Age ═══════════ */
+    const ra=wb.addWorksheet('Retire Age Scenarios');
+    ra.columns=[{width:12},{width:14},{width:18},{width:18},{width:18},{width:12}];
+    R=1;
+    titleRow(ra,R,'RETIREMENT AGE SENSITIVITY',6,13);R+=2;
+    hdrRow(ra,R,['Retire At','Yrs Growth','Portfolio','4% Income/yr','vs Spending','Funded?']);R++;
+    scen.ret.forEach(r=>{
+      dataRow(ra,R,[r.age,r.yrs,r.port,r.w4,r.sur,r.ok?'Yes':'No'],[iFmt,iFmt,$fmt,$fmt,$fmt,null],r.mine);R++;
+    });
 
-    // Spending
-    const speRows=[["Annual Spend","Monthly","Nest Egg Needed","Portfolio","Surplus/(Deficit)","Covered?"]];
-    scen.spe.forEach(r=>speRows.push([r.sp,r.sp/12,r.r4,r.port,r.sur,r.ok?"Yes":"No"]));
-    addSheet("Spending Scenarios",speRows);
+    /* ═══════════ SHEET 5: Spending ═══════════ */
+    const sp=wb.addWorksheet('Spending Scenarios');
+    sp.columns=[{width:16},{width:14},{width:20},{width:18},{width:20},{width:12}];
+    R=1;
+    titleRow(sp,R,'SPENDING LEVEL SENSITIVITY',6,13);R+=2;
+    hdrRow(sp,R,['Annual Spend','Monthly','Nest Egg Needed','Portfolio','Surplus/(Deficit)','Covered?']);R++;
+    scen.spe.forEach(r=>{
+      dataRow(sp,R,[r.sp,r.sp/12,r.r4,r.port,r.sur,r.ok?'Yes':'No'],[$fmt,$fmt,$fmt,$fmt,$fmt,null],r.mine);R++;
+    });
 
-    // Inflation
-    const infRows=[["Inflation Rate","$120K Worth 20yr","Nominal Spend @ Retire","Real Return","Nest Egg Needed"]];
-    scen.inf.forEach(r=>infRows.push([r.inf,r.w20,r.ns,r.rr,r.nest]));
-    addSheet("Inflation Scenarios",infRows);
+    /* ═══════════ SHEET 6: Inflation ═══════════ */
+    const inf=wb.addWorksheet('Inflation Scenarios');
+    inf.columns=[{width:16},{width:22},{width:24},{width:14},{width:20}];
+    R=1;
+    titleRow(inf,R,'INFLATION IMPACT ANALYSIS',5,13);R+=2;
+    hdrRow(inf,R,['Inflation Rate','$120K Worth 20yr','Nominal Spend @ Retire','Real Return','Nest Egg Needed']);R++;
+    scen.inf.forEach(r=>{
+      dataRow(inf,R,[r.inf,r.w20,r.ns,r.rr,r.nest],[pFmt,$fmt,$fmt,pFmt,$fmt],r.mine);R++;
+    });
 
-    // Recession timing
-    const recRows=[["Scenario","Survival Rate","Median @ Retire","Median Estate"]];
-    scen.rec.forEach(r=>recRows.push([r.label,r.sr,r.med,r.fin]));
-    addSheet("Recession Timing",recRows);
+    /* ═══════════ SHEET 7: Recession ═══════════ */
+    const rc=wb.addWorksheet('Recession Timing');
+    rc.columns=[{width:24},{width:16},{width:20},{width:20}];
+    R=1;
+    titleRow(rc,R,'RECESSION TIMING — SURVIVAL ANALYSIS',4,13);R+=2;
+    hdrRow(rc,R,['Scenario','Survival Rate','Median @ Retire','Median Estate']);R++;
+    scen.rec.forEach(r=>{
+      dataRow(rc,R,[r.label,r.sr,r.med,r.fin],[null,pFmt,$fmt,$fmt],r.mine);R++;
+    });
   }
 
-  XLSX.writeFile(WB,"Retirement_Planner.xlsx");
+  /* ── Footer on all sheets ── */
+  wb.eachSheet(ws=>{
+    const lr=ws.rowCount+2;
+    ws.mergeCells(lr,1,lr,ws.columnCount);
+    const c=ws.getCell(lr,1);
+    c.value='Generated by Retirement Planner • For illustrative purposes only — not financial advice.';
+    c.font={name:'Arial',size:9,italic:true,color:{argb:C.gray888}};c.alignment=alC;
+  });
+
+  /* ── Download ── */
+  const buf=await wb.xlsx.writeBuffer();
+  saveAs(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),'Retirement_Planner.xlsx');
 }
 
 /* ── Chart.js components ── */
