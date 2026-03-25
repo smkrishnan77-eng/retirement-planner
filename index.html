@@ -51,8 +51,7 @@ function runMC(p,nSims=1000){
   const ya=retAge-curAge,yd=lifeAge-retAge;
   if(ya<1||yd<1)return null;
   const T=ya+yd;
-  let seed=98765;
-  const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+  const rand=()=>Math.random();
   const randn=()=>{const u=Math.max(rand(),1e-10),v=rand();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
   const lp=1-reEstPct;
   const muA=lp*(stockPre*stockRet+(1-stockPre)*bondRet)+reEstPct*reEstRet;
